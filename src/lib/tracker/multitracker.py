@@ -286,22 +286,31 @@ class JDETracker(object):
         unconfirmed = []
         tracked_stracks = []  # type: list[STrack]
         for track in self.tracked_stracks:
+
+            # 将轨迹放入确认和未确认的队列中，方便下一步比较
             if not track.is_activated:
                 unconfirmed.append(track)
             else:
                 tracked_stracks.append(track)
 
         ''' Step 2: First association, with embedding'''
+
+        # 合并跟踪中的目标和丢失的目标，方便进行丢失目标回收
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
         #for strack in strack_pool:
             #strack.predict()
+        # track update???
         STrack.multi_predict(strack_pool)
+        # 计算特征距离矩阵（代价矩阵）stracks.smooth_feat and detections.feat
         dists = matching.embedding_distance(strack_pool, detections)
         #dists = matching.iou_distance(strack_pool, detections)
+        # 根据kalman filter进一步更新 代价矩阵
         dists = matching.fuse_motion(self.kalman_filter, dists, strack_pool, detections)
+        # 根据阈值线性匹配，获取所有匹配成功和未成功的结果
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=0.4)
 
+        # 更新匹配结果
         for itracked, idet in matches:
             track = strack_pool[itracked]
             det = detections[idet]
@@ -313,11 +322,16 @@ class JDETracker(object):
                 refind_stracks.append(track)
 
         ''' Step 3: Second association, with IOU'''
+
+        # 获取所有未匹配到跟踪段的检测目标
         detections = [detections[i] for i in u_detection]
+        # 获取所有正在跟踪中但是未与新检测结果匹配的跟踪器
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections)
+        # 将新的未匹配检测结果与上一帧正在跟踪但当前帧未匹配的跟踪器 IOU匹配
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=0.5)
 
+        # 更新匹配结果
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
             det = detections[idet]
@@ -327,7 +341,8 @@ class JDETracker(object):
             else:
                 track.re_activate(det, self.frame_id, new_id=False)
                 refind_stracks.append(track)
-                
+
+        # 将未匹配的跟踪器放入 lost stracks 中
         for it in u_track:
             track = r_tracked_stracks[it]
             if not track.state == TrackState.Lost:
@@ -338,6 +353,7 @@ class JDETracker(object):
         detections = [detections[i] for i in u_detection]
         dists = matching.iou_distance(unconfirmed, detections)
         matches, u_unconfirmed, u_detection = matching.linear_assignment(dists, thresh=0.7)
+        # 与未确认轨迹比较，匹配成功，新增轨迹，失败移除未确认轨迹
         for itracked, idet in matches:
             unconfirmed[itracked].update(detections[idet], self.frame_id)
             activated_starcks.append(unconfirmed[itracked])
@@ -347,13 +363,16 @@ class JDETracker(object):
             removed_stracks.append(track)
 
         """ Step 4: Init new stracks"""
+        # 未所有未匹配成功的大于阈值的检测结果添加轨迹并激活
         for inew in u_detection:
             track = detections[inew]
             if track.score < self.det_thresh:
                 continue
+            # 疑问：是否将其添加到unconfirmed中更好，及设置 TrackState.New，这里应该是对检测结果非常信任的原因
             track.activate(self.kalman_filter, self.frame_id)
             activated_starcks.append(track)
         """ Step 5: Update state"""
+        # 移除丢失时间较长的轨迹
         for track in self.lost_stracks:
             if self.frame_id - track.end_frame > self.max_time_lost:
                 track.mark_removed()
@@ -364,10 +383,16 @@ class JDETracker(object):
         self.tracked_stracks = [t for t in self.tracked_stracks if t.state == TrackState.Tracked]
         self.tracked_stracks = joint_stracks(self.tracked_stracks, activated_starcks)
         self.tracked_stracks = joint_stracks(self.tracked_stracks, refind_stracks)
+
+        # 从lost_stracks中移除与self.tracked_stracks ID重复的数据
         self.lost_stracks = sub_stracks(self.lost_stracks, self.tracked_stracks)
+        # 添加新的 lost_stracks
         self.lost_stracks.extend(lost_stracks)
+        # 从self.lost_stracks移除与self.removed_stracks ID重复的数据
         self.lost_stracks = sub_stracks(self.lost_stracks, self.removed_stracks)
+        # 添加新的 removed_stracks
         self.removed_stracks.extend(removed_stracks)
+        # 根据起止时间从 self.tracked_stracks, self.lost_stracks 删除IoU大于0.85且时间较短的轨迹
         self.tracked_stracks, self.lost_stracks = remove_duplicate_stracks(self.tracked_stracks, self.lost_stracks)
         # get scores of lost tracks
         output_stracks = [track for track in self.tracked_stracks if track.is_activated]
